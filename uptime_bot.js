@@ -1,62 +1,144 @@
+const Promise = require('bluebird');
 const fetch = require('isomorphic-unfetch');
+const _omit = require('lodash.omit');
 
-const fetchOptions = {
-    timeout: 5000,
-    redirect: 'manual',
-};
+const FETCH_TIMEOUT = 5000;
+const STORAGE_ATTEMPTS_MAX = 3;
+const VERSION_ID = 2018100301;
+
 const now = () => new Date().getTime();
+const datetime = ms => new Date(ms).toUTCString();
 
-const notify = (ctx, url, data, cb) => {
+const urls = [
+    'https://hoangson.vn',
+    'https://sylvietruong.com',
+];
+
+const dataGet = (ctx) => new Promise((resolve) => {
+    ctx.storage.get((error, data) => resolve((data && data.v === VERSION_ID) ? data : {}));
+});
+
+const dataSet = (ctx, data) => new Promise((resolve) => {
+    // eslint-disable-next-line
+    // TODO: handle conflict error.code = 409
+    ctx.storage.set(data, () => resolve());
+});
+
+const notify = (ctx, storageData, urlsData) => {
     const apiKey = ctx.data.MAILGUN_API_KEY;
     if (!apiKey) {
-        return cb(Object.assign({}, data, { mailgunError: 'MAILGUN_API_KEY secret is missing!' }));
+        return Promise.reject('MAILGUN_API_KEY secret is missing!');
     }
 
     const domain = ctx.data.MAILGUN_DOMAIN;
-    if (!apiKey) {
-        return cb(Object.assign({}, data, { mailgunError: 'MAILGUN_DOMAIN secret is missing!' }));
+    if (!domain) {
+        return Promise.reject('MAILGUN_DOMAIN secret is missing!');
     }
 
     const notifyAddress = ctx.data.NOTIFY_ADDRESS;
     if (!notifyAddress) {
-        return cb(Object.assign({}, data, { mailgunError: 'NOTIFY_ADDRESS secret is missing!' }));
+        return Promise.reject('NOTIFY_ADDRESS secret is missing!');
     }
 
+    let body = '';
+    urlsData.forEach(d => {
+        const { url, error: urlError } = d;
+        if (!urlError) {
+            return;
+        }
+
+        let bodyChecks = '';
+        const { latestUp, checks } = storageData[url];
+        const latestUpStr = latestUp ? datetime(latestUp) : 'Never';
+        checks.forEach(check => {
+            const { start, ms, error: checkError } = check;
+            const startStr = datetime(start);
+            bodyChecks += `Check@${startStr}: ms=${ms}, error=${checkError}\n`;
+        });
+
+        body += `## ${url}\nLatest up: ${latestUpStr}\n${bodyChecks}\n\n`;
+    });
+
     const mailgun = require('mailgun-js')({ apiKey, domain });
-    const dataJson = JSON.stringify(data, null, 2);
-    const mailData = {
+    const mail = {
         from: 'uptime-bot@' + domain,
         to: notifyAddress,
-        subject: `Uptime Notification for ${url}`,
-        text: `Hey!\n\nLook at latest fetch data for ${url}, it doesn't look good:\n\n${dataJson}`,
+        subject: 'Uptime bot notification',
+        text: `Hey!\n\nBelow is the latest check data, it doesn't look good:\n\n${body}`,
 
         'o:tracking': 'no',
     };
-    return mailgun.messages().send(mailData, mailgunError => cb(Object.assign({}, data, { mailgunError })));
-}
+
+    return new Promise((resolve) => {
+        mailgun.messages().send(mail, en => resolve({ body, error: !!en, en }));
+    });
+};
+
+const check = url => {
+    const start = now();
+    const stats = data => Object.assign({ url, start, ms: now() - start }, data);
+    return fetch(url, { timeout: FETCH_TIMEOUT, redirect: 'manual' }).then(
+        response => response.text().then(
+            text => stats({
+                error: !response.ok,
+                status: response.status,
+                length: text.length,
+            }),
+            ep => stats({ error: true, ep })
+        ),
+        ef => stats({ error: true, ef })
+    );
+};
+
+const updateStorage = (ctx, dataOld, urlsData) => {
+    const buildForUrl = urlData => {
+        const { url, start, error } = urlData;
+        const urlDataOld = dataOld[url] ? dataOld[url] : {};
+
+        const latestUp = error ? (urlDataOld.latestUp ? urlDataOld.latestUp : 0) : start;
+
+        let checks = urlDataOld.checks ? urlDataOld.checks : [];
+        const checkData = _omit(urlData, ['url', 'status', 'length']);
+        checks.push(checkData);
+        checks = checks.slice(Math.max(0, checks.length - STORAGE_ATTEMPTS_MAX));
+
+        return { latestCheck: start, latestUp, checks };
+    };
+
+    const dataNew = { v: VERSION_ID };
+    urlsData.forEach(d => (dataNew[d.url] = buildForUrl(d)));
+
+    return dataSet(ctx, dataNew).then(() => ({ storageData: dataNew, urlsData }));
+};
 
 module.exports = function (ctx, cb) {
-    const start = now();
-    const url = ctx.data.TARGET_URL;
+    const startAll = now();
 
-    const prepareData = data => Object.assign({ url, ellapsedInMs: now() - start }, data);
-    const ok = data => cb(null, prepareData(data));
-    const notOk = data => notify(ctx, url, prepareData(data), data2 => cb(null, data2));
-    
-    if (!url) {
-        return notOk({ urlError: 'TARGET_URL secret is missing!' });
-    }
+    const promises = urls.map(check);
+    promises.push(dataGet(ctx));
+    let p = Promise.all(promises);
 
-    fetch(url, fetchOptions).then(
-        r => r.text().then(
-            (text) => {
-                (r.ok ? ok : notOk)({
-                    status: r.status,
-                    textLength: text.length,
-                });
-            },
-            parseError => notOk({ parseError })
-        ),
-        fetchError => notOk({ fetchError })
-    );
+    p = p.then(values => {
+        const storageData = values.pop();
+        return { storageData, urlsData: values };
+    });
+
+    p = p.then(({ storageData, urlsData }) => updateStorage(ctx, storageData, urlsData));
+
+    p = p.then(results => {
+        const { storageData, urlsData } = results;
+        let needNotifying = false;
+        urlsData.forEach(d => (needNotifying = needNotifying || d.error));
+        if (needNotifying) {
+            return notify(ctx, storageData, urlsData)
+                .catch(reason => ({ error: true, catched: reason }))
+                .then(notifyData => Object.assign({ notifyData }, results));
+        }
+
+        return results;
+    });
+
+    p = p.then(({ notifyData, urlsData }) => cb(null, { msTotal: now() - startAll, notifyData, urlsData }));
+
+    return p;
 };

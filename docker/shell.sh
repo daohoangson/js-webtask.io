@@ -25,7 +25,8 @@ set -- sh
 ) || ( \
   docker run --name "$_name" --rm -it \
   -v "$_srcPath:/src" \
-  -v "$_dataPath/yarn:/usr/local/share/.config/yarn" \
+  -v "$_dataPath/yarn/.cache:/usr/local/share/.cache/yarn" \
+  -v "$_dataPath/yarn/.config:/usr/local/share/.config/yarn" \
   -v "$_netrcPath:/root/.netrc" \
   -w "/src" \
   "node:${_nodeLts}-alpine" "$@" \
