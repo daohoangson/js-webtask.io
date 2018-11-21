@@ -2,8 +2,9 @@ const Promise = require('bluebird');
 const fetch = require('isomorphic-unfetch');
 const _omit = require('lodash.omit');
 
-const FETCH_TIMEOUT = 5000;
-const STORAGE_ATTEMPTS_MAX = 3;
+const CONSECUTIVE_ERROR_COUNT_TO_NOTIFY = 2;
+const FETCH_TIMEOUT = 10000;
+const STORAGE_ATTEMPTS_MAX = 10;
 const VERSION_ID = 2018100301;
 
 const now = () => new Date().getTime();
@@ -42,22 +43,42 @@ const notify = (ctx, storageData, urlsData) => {
 
     let body = '';
     urlsData.forEach(d => {
-        const { url, error: urlError } = d;
-        if (!urlError) {
+        const { url, error: urlFailed } = d;
+        if (!urlFailed) {
             return;
         }
 
         let bodyChecks = '';
-        const { latestUp, checks } = storageData[url];
+        let foundNonError = false;
+        let consecutiveErrorCount = 0;
+        const { latestUp, checks: originalChecks } = storageData[url];
         const latestUpStr = latestUp ? datetime(latestUp) : 'Never';
+        const checks = originalChecks.slice().reverse();
         checks.forEach(check => {
-            const { start, ms, error: checkError } = check;
+            const { start, ms, error: checkFailed } = check;
             const startStr = datetime(start);
-            bodyChecks += `Check@${startStr}: ms=${ms}, error=${checkError}\n`;
+
+            if (checkFailed) {
+                if (foundNonError === false) {
+                    consecutiveErrorCount++;
+                }
+            } else {
+                foundNonError = true;
+            }
+
+            bodyChecks += `Check@${startStr}: ms=${ms}, error=${checkFailed}\n`;
         });
+
+        if (consecutiveErrorCount < CONSECUTIVE_ERROR_COUNT_TO_NOTIFY) {
+            return;
+        }
 
         body += `## ${url}\nLatest up: ${latestUpStr}\n${bodyChecks}\n\n`;
     });
+
+    if (body === '') {
+        return { body, error: false, en: null };
+    }
 
     const mailgun = require('mailgun-js')({ apiKey, domain });
     const mail = {
