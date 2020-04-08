@@ -26,21 +26,6 @@ const dataSet = (ctx, data) => new Promise((resolve) => {
 });
 
 const notify = (ctx, storageData, urlsData) => {
-    const apiKey = ctx.data.MAILGUN_API_KEY;
-    if (!apiKey) {
-        return Promise.reject('MAILGUN_API_KEY secret is missing!');
-    }
-
-    const domain = ctx.data.MAILGUN_DOMAIN;
-    if (!domain) {
-        return Promise.reject('MAILGUN_DOMAIN secret is missing!');
-    }
-
-    const notifyAddress = ctx.data.NOTIFY_ADDRESS;
-    if (!notifyAddress) {
-        return Promise.reject('NOTIFY_ADDRESS secret is missing!');
-    }
-
     let body = '';
     urlsData.forEach(d => {
         const { url, error: urlFailed } = d;
@@ -80,6 +65,31 @@ const notify = (ctx, storageData, urlsData) => {
         return { body, error: false, en: null };
     }
 
+    if (ctx.data.TELEGRAM_BOT_TOKEN) {
+        return notifyTelegram(ctx, body);
+    }
+    if (ctx.data.MAILGUN_API_KEY) {
+        return notifyMailgun(ctx, body);
+    }
+    return { body, error: true, en: 'No notification method available.' }
+};
+
+const notifyMailgun = (ctx, body) => {
+    const apiKey = ctx.data.MAILGUN_API_KEY;
+    if (!apiKey) {
+        return Promise.reject('MAILGUN_API_KEY secret is missing!');
+    }
+
+    const domain = ctx.data.MAILGUN_DOMAIN;
+    if (!domain) {
+        return Promise.reject('MAILGUN_DOMAIN secret is missing!');
+    }
+
+    const notifyAddress = ctx.data.NOTIFY_ADDRESS;
+    if (!notifyAddress) {
+        return Promise.reject('NOTIFY_ADDRESS secret is missing!');
+    }
+
     const mailgun = require('mailgun-js')({ apiKey, domain });
     const mail = {
         from: 'uptime-bot@' + domain,
@@ -93,6 +103,25 @@ const notify = (ctx, storageData, urlsData) => {
     return new Promise((resolve) => {
         mailgun.messages().send(mail, en => resolve({ body, error: !!en, en }));
     });
+};
+
+const notifyTelegram = (ctx, body) => {
+    const botToken = ctx.data.TELEGRAM_BOT_TOKEN;
+    if (!botToken) {
+        return Promise.reject('TELEGRAM_BOT_TOKEN secret is missing!');
+    }
+
+    const chatId = ctx.data.TELEGRAM_CHAT_ID;
+    if (!chatId) {
+        return Promise.reject('TELEGRAM_CHAT_ID secret is missing!');
+    }
+
+    const Slimbot = require('slimbot');
+    const slimbot = new Slimbot(botToken);
+    return slimbot.sendMessage(chatId, body).then(
+        () => ({ body, error: false, en: null }),
+        en => ({ body, error: true, en })
+    );
 };
 
 const check = url => {
