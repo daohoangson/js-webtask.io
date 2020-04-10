@@ -17,7 +17,7 @@ if [ ! -f "$_netrcPath" ]; then
 fi
 
 _name='webtask'
-_nodeLts='8.12.0'
+_nodeLts='8.16.2'
 set -- sh
 
 ( \
